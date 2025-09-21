@@ -1,0 +1,112 @@
+name: 🚀 Performance Testing with JMeter
+
+on:
+  # Triggers the workflow on pull request events but only for the "master" branch
+  pull_request:
+    branches: [ "master" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      threads:
+        description: "Number Of Threads (VUs) :"
+        required: true
+        default: 10
+        type: number
+      rampup:
+        description: "Ramp-up period in seconds"
+        required: true
+        default: 30
+        type: number
+      duration:
+        description: "Test duration in seconds"
+        required: true
+        default: 60
+        type: number
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+    - name: Install Java
+      uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165
+      with:
+        java-version: '11'
+        distribution: 'adopt'
+
+    - name: Install JMeter
+      run: |
+        wget https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.5.tgz
+        tar -xzf apache-jmeter-5.5.tgz
+        sudo mv apache-jmeter-5.5 /opt/jmeter
+        sudo chmod +x /opt/jmeter/bin/jmeter
+
+    - name: Create Results Directory
+      run: mkdir -p results
+
+    - name: Run Test
+      run: |
+        /opt/jmeter/bin/jmeter -n \
+          -t tests/login-test.jmx \
+          -l results/test-results.jtl \
+          -e -o results/html-report \
+          -Jthreads=${{ github.event.inputs.threads || 10 }} \
+          -Jrampup=${{ github.event.inputs.rampup || 30 }} \
+          -Jduration=${{ github.event.inputs.duration || 60 }} \
+          -Djmeter.reportgenerator.overall_granularity=60000
+
+    - name: Generate Test Summary
+      run : |
+        echo "# JMeter Performance Test Results" > results/summary.md
+        echo "" >> results/summary.md
+        echo "## Test Configuration" >> results/summary.md
+        echo "- **Threads (Users):** ${{ github.event.inputs.threads || 10 }}" >> results/summary.md
+        echo "- **Ramp-up Period:** ${{ github.event.inputs.rampup || 30 }} seconds" >> results/summary.md
+        echo "- **Test Duration:** ${{ github.event.inputs.duration || 60 }} seconds" >> results/summary.md
+        echo "- **Target URL:** https://www.google.com" >> results/summary.md
+        echo "" >> results/summary.md
+        echo "## Test Summary" >> results/summary.md
+
+        # Extract key metrics from JTL file
+        if [ -f results/test-results.jtl ]; then
+          total_samples=$(tail -n +2 results/test-results.jtl | wc -l)
+          error_count=$(tail -n +2 results/test-results.jtl | awk -F',' '$8=="false" {count++} END {print count+0}')
+          error_rate=$(echo "scale=2; $error_count * 100 / $total_samples" | bc -l 2>/dev/null || echo "0")
+          
+          echo "- **Total Samples:** $total_samples" >> results/summary.md
+          echo "- **Error Count:** $error_count" >> results/summary.md
+          echo "- **Error Rate:** $error_rate%" >> results/summary.md
+          
+          # Calculate average response time
+          avg_response_time=$(tail -n +2 results/test-results.jtl | awk -F',' '{sum+=$2; count++} END {if(count>0) print int(sum/count); else print 0}')
+          echo "- **Average Response Time:** ${avg_response_time}ms" >> results/summary.md
+          
+          # Check if error rate is acceptable (less than 1%)
+          if (( $(echo "$error_rate < 1" | bc -l) )); then
+            echo "- **Status:** ✅ PASSED" >> results/summary.md
+          else
+            echo "- **Status:** ❌ FAILED (Error rate too high)" >> results/summary.md
+          fi
+        fi
+
+    - name: Upload JMeter Results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: jmeter-results
+        path: |
+          results/
+          !results/test-results.jtl
+        retention-days: 30
+
+    - name: Upload JTL File
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: jmeter-raw-results
+        path: results/test-results.jtl
+        retention-days: 7
