@@ -1,36 +1,112 @@
-# This is a basic workflow to help you get started with Actions
+name: JMeter Performance Test
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "master" branch
-  push:
-    branches: [ "master" ]
+  # Triggers the workflow on pull request events but only for the "master" branch
   pull_request:
     branches: [ "master" ]
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      threads:
+        description: "Number Of Threads (VUs) :"
+        required: true
+        default: 10
+        type: number
+      rampup:
+        description: "Ramp-up period in seconds"
+        required: true
+        default: 30
+        type: number
+      duration:
+        description: "Test duration in seconds"
+        required: true
+        default: 60
+        type: number
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  performance-test:
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@ff7abcd0c3c05ccf6adc123a8cd1fd4fb30fb493
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+    - name: Install Java
+      uses: actions/setup-java@ead9eaa3cfe0b0fc2fa749519ae09c3d4f4080b0
+      with:
+        java-version: '11'
+        distribution: 'adopt'
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+    - name: Install JMeter
+      run: |
+        wget https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.5.tgz
+        tar -xzf apache-jmeter-5.5.tgz
+        sudo mv apache-jmeter-5.5 /opt/jmeter
+        sudo chmod +x /opt/jmeter/bin/jmeter
+
+    - name: Create Results Directory
+      run: mkdir -p results
+
+    - name: Run Test
+      run: |
+        /opt/jmeter/bin/jmeter -n \
+          -t login-test.jmx \
+          -l results/test-results.jtl \
+          -e -o results/html-report \
+          -Jthreads=${{ github.event.inputs.threads || 10 }} \
+          -Jrampup=${{ github.event.inputs.rampup || 30 }} \
+          -Jduration=${{ github.event.inputs.duration || 60 }} \
+          -Djmeter.reportgenerator.overall_granularity=60000
+
+    - name: Generate Test Summary
+      run : |
+        echo "# JMeter Performance Test Results" > results/summary.md
+        echo "" >> results/summary.md
+        echo "## Test Configuration" >> results/summary.md
+        echo "- **Threads (Users):** ${{ github.event.inputs.threads || 10 }}" >> results/summary.md
+        echo "- **Ramp-up Period:** ${{ github.event.inputs.rampup || 30 }} seconds" >> results/summary.md
+        echo "- **Test Duration:** ${{ github.event.inputs.duration || 60 }} seconds" >> results/summary.md
+        echo "- **Target URL:** https://www.google.com" >> results/summary.md
+        echo "" >> results/summary.md
+        echo "## Test Summary" >> results/summary.md
+
+        # Extract key metrics from JTL file
+        if [ -f results/test-results.jtl ]; then
+          total_samples=$(tail -n +2 results/test-results.jtl | wc -l)
+          error_count=$(tail -n +2 results/test-results.jtl | awk -F',' '$8=="false" {count++} END {print count+0}')
+          error_rate=$(echo "scale=2; $error_count * 100 / $total_samples" | bc -l 2>/dev/null || echo "0")
+          
+          echo "- **Total Samples:** $total_samples" >> results/summary.md
+          echo "- **Error Count:** $error_count" >> results/summary.md
+          echo "- **Error Rate:** $error_rate%" >> results/summary.md
+          
+          # Calculate average response time
+          avg_response_time=$(tail -n +2 results/test-results.jtl | awk -F',' '{sum+=$2; count++} END {if(count>0) print int(sum/count); else print 0}')
+          echo "- **Average Response Time:** ${avg_response_time}ms" >> results/summary.md
+          
+          # Check if error rate is acceptable (less than 1%)
+          if (( $(echo "$error_rate < 1" | bc -l) )); then
+            echo "- **Status:** ✅ PASSED" >> results/summary.md
+          else
+            echo "- **Status:** ❌ FAILED (Error rate too high)" >> results/summary.md
+          fi
+        fi
+
+    - name: Upload JMeter Results
+      uses: actions/upload-artifacts@de65e23aa2b7e23d713bb51fbfcb6d502f8667d8
+      if: always()
+      with:
+        name: jmeter-results
+        path: |
+          results/
+          !results/test-results.jtl
+        retention-days: 30
+
+    - name: Upload JTL File
+      uses: actions/upload-artifacts@de65e23aa2b7e23d713bb51fbfcb6d502f8667d8
+      if: always()
+      with:
+        name: jmeter-raw-results
+        path: results/test-results.jtl
+        retention-days: 7
